@@ -1,0 +1,106 @@
+# OPERAQ STORE APPS · builds each company's phone apps for Google Play and the App Store (README.md).
+# The OperaQ server starts it when a company taps "Build" in Phone apps (workflow_dispatch with the build's id);
+# every 15 minutes it also picks up any build still waiting. A push or pull request runs a self-test build of both.
+# This repo is PUBLIC so GitHub's Linux and Mac minutes are free: no secrets in code, never upload-artifact,
+# and every company key and name is masked in the log (README › Public repo). Pull requests get no secrets.
+name: OperaQ phone app build
+
+on:
+  workflow_dispatch:
+    inputs:
+      api:
+        description: OperaQ server
+        type: choice
+        options: [https://operaq.app, https://staging.operaq.app]
+        default: https://operaq.app
+      job_id:
+        description: Build id (empty = the next waiting build)
+        required: false
+  schedule:
+    - cron: '*/15 * * * *'
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  claim:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      api: ${{ steps.c.outputs.api }}
+      job_id: ${{ steps.c.outputs.job_id }}
+      platform: ${{ steps.c.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - id: c
+        env:
+          OPERAQ_BUILD_TOKEN: ${{ secrets.OPERAQ_BUILD_TOKEN }}
+        run: node runner.mjs claim "${{ github.event_name == 'workflow_dispatch' && inputs.api || 'https://operaq.app,https://staging.operaq.app' }}" "${{ inputs.job_id }}"
+
+  android:
+    needs: claim
+    if: needs.claim.outputs.platform == 'android'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 21 }
+      - run: bash build-android.sh
+        env:
+          API: ${{ needs.claim.outputs.api }}
+          JOB_ID: ${{ needs.claim.outputs.job_id }}
+          OPERAQ_BUILD_TOKEN: ${{ secrets.OPERAQ_BUILD_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  ios:
+    needs: claim
+    if: needs.claim.outputs.platform == 'ios'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: ruby/setup-ruby@v1
+        with: { ruby-version: '3.3', bundler-cache: true, working-directory: . }
+      - run: bash build-ios.sh
+        env:
+          API: ${{ needs.claim.outputs.api }}
+          JOB_ID: ${{ needs.claim.outputs.job_id }}
+          OPERAQ_BUILD_TOKEN: ${{ secrets.OPERAQ_BUILD_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FASTLANE_SKIP_UPDATE_CHECK: '1'
+          FASTLANE_HIDE_CHANGELOG: '1'
+
+  # The push / pull request check: both shells build from scratch (no company, no keys, nothing uploaded).
+  self-test-android:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: 21 }
+      - run: node --test tests/*.test.mjs
+      - run: SELF_TEST=1 bash build-android.sh
+
+  self-test-ios:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: SELF_TEST=1 bash build-ios.sh

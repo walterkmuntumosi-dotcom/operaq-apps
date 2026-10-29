@@ -1,0 +1,93 @@
+# OPERAQ STORE APPS · build, sign and upload one company's iPhone app to TestFlight with the company's own
+# App Store Connect API key (Admin). Run by .github/workflows/operaq-app-build.yml on GitHub's Mac:
+#   OPERAQ_JOB=<job.json> APP_DIR=<prepared app> bundle exec fastlane ios store
+# Writes ios-result.json { status, message, signing? } that the workflow sends back to OperaQ.
+require 'json'
+require 'base64'
+require 'securerandom'
+
+default_platform(:ios)
+
+def operaq_result(status, message, extra = {})
+  File.write(File.expand_path('../ios-result.json', __dir__), JSON.generate({ status: status, message: message }.merge(extra)))
+end
+
+platform :ios do
+  lane :store do
+    new_signing = nil
+    job = JSON.parse(File.read(ENV.fetch('OPERAQ_JOB')))
+    app_dir = File.expand_path(ENV.fetch('APP_DIR'))
+    key = job.dig('ios', 'apiKey') || {}
+    bundle = job['appId']
+
+    api_key = app_store_connect_api_key(key_id: key['keyId'], issuer_id: key['issuerId'], key_content: key['p8'], in_house: false)
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(key_id: key['keyId'], issuer_id: key['issuerId'], key: key['p8'])
+
+    # 1. The app's ID on the Apple Developer portal (made once; the company sees it in Phone apps).
+    bid = Spaceship::ConnectAPI::BundleId.find(bundle) ||
+          Spaceship::ConnectAPI::BundleId.create(name: job['appName'][0, 30].gsub(/[^A-Za-z0-9 ]/, ' ').strip, identifier: bundle, platform: 'IOS')
+    team_id = job.dig('ios', 'teamId').to_s.empty? ? bid.seed_id : job.dig('ios', 'teamId')
+    puts "::add-mask::#{team_id}" # public build log (README › Public repo)
+
+    # 2. Apple does not let anyone create the app record by API: the company makes it once in App Store Connect.
+    app = Spaceship::ConnectAPI::App.find(bundle)
+    puts "::add-mask::#{app.id}" if app
+    unless app
+      operaq_result('needs_app_record', "Create the app in App Store Connect first: Apps › + › New App, bundle ID #{bundle}. Then build again.")
+      next
+    end
+
+    # 3. Signing: the company's distribution certificate (made once, kept sealed by OperaQ) and a fresh profile.
+    kc_pw = SecureRandom.hex(16)
+    create_keychain(name: 'operaq', password: kc_pw, default_keychain: true, unlock: true, timeout: 3600, lock_when_sleeps: false)
+    kc_path = File.expand_path('~/Library/Keychains/operaq-db')
+    sign_dir = File.expand_path('../signing', __dir__)
+    Dir.mkdir(sign_dir) unless Dir.exist?(sign_dir)
+    signing = job.dig('ios', 'signing')
+    cert_id = nil
+    if signing && signing['p12'] && signing['certId']
+      p12 = File.join(sign_dir, 'dist.p12')
+      File.binwrite(p12, Base64.decode64(signing['p12']))
+      import_certificate(certificate_path: p12, certificate_password: signing['password'].to_s, keychain_name: 'operaq', keychain_password: kc_pw)
+      cert_id = signing['certId']
+      puts "::add-mask::#{cert_id}"
+    end
+    unless cert_id && Spaceship::ConnectAPI::Certificate.all.any? { |c| c.id == cert_id }
+      get_certificates(api_key: api_key, development: false, output_path: sign_dir, keychain_path: kc_path, keychain_password: kc_pw, generate_apple_certs: true)
+      cert_id = lane_context[SharedValues::CERT_CERTIFICATE_ID]
+      puts "::add-mask::#{cert_id}" if cert_id
+      p12_path = File.join(sign_dir, "#{cert_id}.p12")
+      if File.exist?(p12_path)
+        cert = Spaceship::ConnectAPI::Certificate.all.find { |c| c.id == cert_id }
+        new_signing = { certId: cert_id, p12: Base64.strict_encode64(File.binread(p12_path)), password: '', expiresAt: cert && cert.expiration_date }
+      end
+    end
+    get_provisioning_profile(api_key: api_key, app_identifier: bundle, cert_id: cert_id, output_path: sign_dir, force: true, skip_install: false)
+    profile = lane_context[SharedValues::SIGH_NAME]
+
+    project = File.join(app_dir, 'ios/App/App.xcodeproj')
+    update_code_signing_settings(path: project, use_automatic_signing: false, team_id: team_id, code_sign_identity: 'Apple Distribution',
+                                 profile_name: profile, bundle_identifier: bundle, targets: ['App'])
+    build_app(project: project, scheme: 'App', configuration: 'Release', export_method: 'app-store',
+              output_directory: File.expand_path('../build', __dir__), output_name: 'App.ipa', clean: true,
+              xcargs: "DEVELOPMENT_TEAM=#{team_id}", export_options: { provisioningProfiles: { bundle => profile } })
+
+    # 4. To TestFlight (Apple checks it in 10–30 minutes; the company then submits it for review).
+    upload_to_testflight(api_key: api_key, ipa: File.expand_path('../build/App.ipa', __dir__), apple_id: app.id,
+                         skip_waiting_for_build_processing: true)
+    operaq_result('uploaded', "Sent to TestFlight: version #{job['version']} (#{job['buildNumber']}). Apple checks it in 10–30 minutes.",
+                  new_signing ? { signing: new_signing } : {})
+  rescue => e
+    msg = e.message.to_s
+    hint = if msg =~ /maximum number of.*certificates/i
+             'Apple allows only a few distribution certificates. Revoke an unused one at developer.apple.com › Certificates, then build again.'
+           elsif msg =~ /401|NOT_AUTHORIZED|authentication credentials/i
+             'Apple did not accept the App Store Connect key. Check it has the Admin role, or add a new key in Phone apps › Apple.'
+           elsif msg =~ /bundle version must be higher|already been used|ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE/i
+             'Apple already has this build number. Build again (OperaQ raises the number by one).'
+           else
+             msg[0, 600]
+           end
+    operaq_result('failed', hint, new_signing ? { signing: new_signing } : {})
+  end
+end

@@ -1,0 +1,9 @@
+shell/node_modules/
+shell/android/
+shell/ios/
+signing/
+build/
+ios-result.json
+play-result.json
+.bundle/
+vendor/

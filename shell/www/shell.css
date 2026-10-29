@@ -1,0 +1,11 @@
+/* The only screens the shell draws itself: opening and "no connection". Colours come from app.json (prepare.mjs). */
+:root { --brand: #111111; --bg: #ffffff; --ink: #111111; --muted: #6b6b6b; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+main { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom)); text-align: center; }
+h1 { font-size: 20px; margin: 0; }
+p { margin: 0; color: var(--muted); }
+button { margin-top: 8px; border: 0; border-radius: 12px; padding: 14px 28px; font: inherit; font-weight: 600; background: var(--brand); color: #fff; }
+.spin { width: 36px; height: 36px; border-radius: 50%; border: 3px solid rgba(0,0,0,.08); border-top-color: var(--brand); animation: s 0.9s linear infinite; }
+@keyframes s { to { transform: rotate(360deg); } }
+.powered { position: fixed; bottom: calc(16px + env(safe-area-inset-bottom)); font-size: 12px; }
