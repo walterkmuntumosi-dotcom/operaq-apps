@@ -56,7 +56,30 @@ export function checkJob(job) {
   if (job.brand && !HEX.test(job.brand)) bad.push('brand must be a colour like #112233');
   if (job.background && !HEX.test(job.background)) bad.push('background must be a colour like #ffffff');
   if (job.icon && !/^data:image\/png;base64,/.test(job.icon)) bad.push('icon must be a PNG');
+  if (job.push && job.platform === 'android') {
+    const why = googleServicesProblem(job);
+    if (why) bad.push(why);
+  }
   return bad;
+}
+
+export const PUSH_PLUGIN = '@capacitor/push-notifications';
+
+/** Android notifications need the company's Firebase file (made by OperaQ when the company turns notifications on). */
+export function googleServicesOf(job) {
+  const raw = job.android && job.android.googleServices;
+  if (!raw) return null;
+  const text = String(raw).trim().startsWith('{') ? String(raw) : Buffer.from(String(raw), 'base64').toString('utf8');
+  return JSON.parse(text);
+}
+
+function googleServicesProblem(job) {
+  let g;
+  try { g = googleServicesOf(job); } catch { return 'the Firebase file (google-services.json) is not valid'; }
+  if (!g) return 'notifications are on but the Firebase file is missing: turn Android notifications off and on again in Phone apps';
+  const names = (g.client || []).map((c) => c.client_info && c.client_info.android_client_info && c.client_info.android_client_info.package_name);
+  if (!names.includes(job.appId)) return 'the Firebase file is for another app id: turn Android notifications off and on again in Phone apps';
+  return null;
 }
 
 /** The Capacitor config of the job (the app opens startUrl; OperaQ and the company's own domain stay inside the app). */
@@ -74,6 +97,7 @@ export function capacitorConfig(job) {
     ios: { contentInset: 'never', limitsNavigationsToAppBoundDomains: false },
     plugins: {
       SplashScreen: { launchShowDuration: 800, launchAutoHide: true, backgroundColor: job.background || '#ffffff', showSpinner: false },
+      ...(job.push ? { PushNotifications: { presentationOptions: ['badge', 'sound', 'alert'] } } : {}),
     },
   };
 }
@@ -112,12 +136,44 @@ export function patchInfoPlist(plist, job) {
   return p;
 }
 
-/** iPhone: version + build number + display name in the Xcode project. */
+/** iPhone: version + build number + display name in the Xcode project (+ the notifications entitlement when push is on). */
 export function patchPbxproj(pbx, job) {
-  return pbx
+  let p = pbx
     .replace(/MARKETING_VERSION = [^;]+;/g, `MARKETING_VERSION = ${job.version};`)
     .replace(/CURRENT_PROJECT_VERSION = [^;]+;/g, `CURRENT_PROJECT_VERSION = ${job.buildNumber};`)
     .replace(/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/g, `PRODUCT_BUNDLE_IDENTIFIER = ${job.appId};`);
+  if (job.push && !p.includes('CODE_SIGN_ENTITLEMENTS')) {
+    p = p.replace(/^(\s*)(PRODUCT_BUNDLE_IDENTIFIER = [^;]+;)$/gm, '$1CODE_SIGN_ENTITLEMENTS = App/App.entitlements;\n$1$2');
+  }
+  return p;
+}
+
+/** iPhone: the notifications entitlement (store builds talk to Apple's production push service). */
+export const ENTITLEMENTS = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>aps-environment</key>
+\t<string>production</string>
+</dict>
+</plist>
+`;
+
+/** iPhone: hand the phone's push address to Capacitor (its plugin needs these two calls in AppDelegate). */
+export function patchAppDelegate(swift) {
+  if (swift.includes('capacitorDidRegisterForRemoteNotifications')) return swift;
+  const add = `
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+    }
+`;
+  const at = swift.lastIndexOf('}');
+  if (at < 0) throw new Error('AppDelegate.swift has an unexpected shape');
+  return `${swift.slice(0, at).replace(/\s*$/, '\n')}${add}}${swift.slice(at + 1)}`;
 }
 
 function run(cmd, args, cwd) {
@@ -137,6 +193,13 @@ export function prepare(job, out) {
   const icon = job.icon ? Buffer.from(job.icon.split(',')[1], 'base64') : readFileSync(join(here, 'default-icon.png'));
   writeFileSync(join(out, 'assets', 'logo.png'), icon);
 
+  // The notifications plugin is only linked into apps that use it (Apple flags a push plugin without the entitlement).
+  if (!job.push) {
+    const pkgPath = join(out, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    delete pkg.dependencies[PUSH_PLUGIN];
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+  }
   run('npm', ['ci', '--no-audit', '--no-fund'], out);
   run('npx', ['cap', 'add', job.platform], out);
   const bg = job.background || '#ffffff';
@@ -147,14 +210,21 @@ export function prepare(job, out) {
     const gPath = join(out, 'android/app/build.gradle');
     const { manifest, gradle } = patchAndroid(readFileSync(mPath, 'utf8'), readFileSync(gPath, 'utf8'), job);
     writeFileSync(mPath, manifest); writeFileSync(gPath, gradle);
+    // Capacitor's app/build.gradle applies the Google services plugin when this file is there.
+    if (job.push) writeFileSync(join(out, 'android/app/google-services.json'), JSON.stringify(googleServicesOf(job), null, 2));
   } else {
     const pPath = join(out, 'ios/App/App/Info.plist');
     const xPath = join(out, 'ios/App/App.xcodeproj/project.pbxproj');
     writeFileSync(pPath, patchInfoPlist(readFileSync(pPath, 'utf8'), job));
     writeFileSync(xPath, patchPbxproj(readFileSync(xPath, 'utf8'), job));
+    if (job.push) {
+      writeFileSync(join(out, 'ios/App/App/App.entitlements'), ENTITLEMENTS);
+      const dPath = join(out, 'ios/App/App/AppDelegate.swift');
+      writeFileSync(dPath, patchAppDelegate(readFileSync(dPath, 'utf8')));
+    }
   }
   run('npx', ['cap', 'sync', job.platform], out);
-  console.log(`Ready: ${job.appName} (${job.appId}) ${job.version} (${job.buildNumber}) for ${job.platform}, opens ${job.startUrl}`);
+  console.log(`Ready: ${job.appName} (${job.appId}) ${job.version} (${job.buildNumber}) for ${job.platform}, opens ${job.startUrl}${job.push ? ', with notifications' : ''}`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

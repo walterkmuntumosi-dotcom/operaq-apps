@@ -28,6 +28,16 @@ uploads; the company connects its keys in the back office (Workspace › Phone a
    company's App Store Connect key (Admin). The company creates the app record once in App Store Connect (Apple's rule).
 6. Status goes back to the server and shows in Phone apps.
 
+## Notifications
+When a company turns notifications on in Phone apps (step 5), the job carries `push: true`:
+- the shell links `@capacitor/push-notifications` (apps without notifications never get the plugin);
+- iPhone: `App.entitlements` with `aps-environment = production`, the two AppDelegate calls that hand the phone's push
+  address to Capacitor, and the Push Notifications switch on the app id (fastlane makes a fresh profile with it);
+- Android: `android/app/google-services.json` from `job.android.googleServices` (the company's own Firebase app, made by
+  OperaQ in the company's Google Cloud project); Capacitor's Gradle file then applies the Google services plugin.
+The app's OperaQ screens ask for permission and register the phone with the server; the server sends the notifications
+(APNs with the company's key, Firebase Cloud Messaging with its service account). Every value of the Firebase file is masked.
+
 ## One-time setup (owner)
 - Run `bash operaq-apps/setup-builds.sh` from the private ops repo on the Mac once. It sets this repo's GitHub secret
   `OPERAQ_BUILD_TOKEN` = the same value as the server env `OPERAQ_BUILD_RUNNER_TOKEN` (staging and live).
@@ -46,4 +56,5 @@ company's builds never cost OperaQ anything. That only works safely because:
 When you add a new key or identifier to the job, add it to `secretsOf` or `identifiersOf` in the same change.
 
 ## Checks
-`node --test tests/*.test.mjs` and, on every push or pull request, a self-test build of both shells (no keys, nothing uploaded).
+`node --test tests/*.test.mjs` and, on every push or pull request, a self-test build of both shells, with and without
+notifications (`self-test-*-push.json`; no keys, nothing uploaded).

@@ -94,6 +94,7 @@ jobs:
         with: { distribution: temurin, java-version: 21 }
       - run: node --test tests/*.test.mjs
       - run: SELF_TEST=1 bash build-android.sh
+      - run: SELF_TEST=1 SELF_TEST_JOB=self-test-android-push.json bash build-android.sh
 
   self-test-ios:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -104,3 +105,4 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
       - run: SELF_TEST=1 bash build-ios.sh
+      - run: SELF_TEST=1 SELF_TEST_JOB=self-test-ios-push.json bash build-ios.sh

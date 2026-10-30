@@ -2,8 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, createVerify } from 'node:crypto';
-import { checkJob, capacitorConfig, patchAndroid, patchInfoPlist, patchPbxproj } from '../prepare.mjs';
-import { apiBase, secretsOf, serviceAccountJwt, playUpload } from '../runner.mjs';
+import { checkJob, capacitorConfig, patchAndroid, patchInfoPlist, patchPbxproj, patchAppDelegate, googleServicesOf, ENTITLEMENTS } from '../prepare.mjs';
+import { apiBase, secretsOf, identifiersOf, serviceAccountJwt, playUpload } from '../runner.mjs';
 
 const job = { platform: 'android', kind: 'driver', appId: 'app.operaq.acme.driver', appName: 'Acme Driver', version: '1.2.0', buildNumber: 7, startUrl: 'https://operaq.app/deliver/app/driver/acme', brand: '#0F766E', background: '#ffffff' };
 
@@ -113,4 +113,48 @@ test('public build log: the company name, store id, addresses and Apple ids are 
     assert.ok(ids.includes(v), v);
   }
   assert.ok(!ids.includes('driver') && !ids.includes('operaq.app'), 'generic words stay readable');
+});
+
+/* ── notifications ─────────────────────────────────────────────────────────────────────────────────────────── */
+
+const firebase = (pkg) => Buffer.from(JSON.stringify({
+  project_info: { project_number: '987654321098', project_id: 'acme-rides-push', storage_bucket: 'acme-rides-push.appspot.com' },
+  client: [{ client_info: { mobilesdk_app_id: '1:987654321098:android:abcdef0123456789', android_client_info: { package_name: pkg } }, api_key: [{ current_key: 'AIzaFakeFakeFakeFakeFake' }] }],
+  configuration_version: '1',
+})).toString('base64');
+
+test('notifications: Android needs the Firebase file of this very app', () => {
+  const on = { ...job, push: true };
+  assert.ok(checkJob(on).some((m) => /Firebase file is missing/.test(m)));
+  assert.ok(checkJob({ ...on, android: { googleServices: 'not base64 json' } }).some((m) => /not valid/.test(m)));
+  assert.ok(checkJob({ ...on, android: { googleServices: firebase('app.operaq.other.driver') } }).some((m) => /another app id/.test(m)));
+  assert.deepEqual(checkJob({ ...on, android: { googleServices: firebase(job.appId) } }), []);
+  assert.equal(googleServicesOf({ android: { googleServices: firebase(job.appId) } }).project_info.project_id, 'acme-rides-push');
+  assert.deepEqual(checkJob({ ...job, platform: 'ios', push: true }), [], 'iPhone needs no Firebase file');
+});
+
+test('notifications: iPhone gets the production entitlement and hands the push address to Capacitor', () => {
+  const pbx = '\t\t\t\tMARKETING_VERSION = 1.0;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.capacitorjs.app;\n\t\t\t\tSWIFT_VERSION = 5.0;\n\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.capacitorjs.app;\n';
+  const on = patchPbxproj(pbx, { ...job, platform: 'ios', push: true });
+  assert.equal(on.match(/CODE_SIGN_ENTITLEMENTS = App\/App.entitlements;/g).length, 2);
+  assert.equal(patchPbxproj(on, { ...job, platform: 'ios', push: true }).match(/CODE_SIGN_ENTITLEMENTS/g).length, 2, 'added once');
+  assert.ok(!patchPbxproj(pbx, { ...job, platform: 'ios' }).includes('CODE_SIGN_ENTITLEMENTS'), 'no entitlement without notifications');
+  assert.match(ENTITLEMENTS, /<key>aps-environment<\/key>\s*<string>production<\/string>/);
+  const swift = 'import UIKit\nimport Capacitor\n\n@UIApplicationMain\nclass AppDelegate: UIResponder, UIApplicationDelegate {\n    var window: UIWindow?\n}\n';
+  const d = patchAppDelegate(swift);
+  assert.match(d, /didRegisterForRemoteNotificationsWithDeviceToken[\s\S]*capacitorDidRegisterForRemoteNotifications[\s\S]*capacitorDidFailToRegisterForRemoteNotifications[\s\S]*\n}\n$/);
+  assert.equal(patchAppDelegate(d), d, 'patched once');
+});
+
+test('notifications: the app config asks for banners, and only when they are on', () => {
+  assert.deepEqual(capacitorConfig({ ...job, push: true }).plugins.PushNotifications.presentationOptions, ['badge', 'sound', 'alert']);
+  assert.equal(capacitorConfig(job).plugins.PushNotifications, undefined);
+});
+
+test('public build log: every value of the Firebase file is masked', () => {
+  const j = { ...job, push: true, android: { googleServices: firebase(job.appId) } };
+  const masked = [...secretsOf(j), ...identifiersOf(j)];
+  for (const v of [j.android.googleServices, 'AIzaFakeFakeFakeFakeFake', '987654321098', 'acme-rides-push', 'acme-rides-push.appspot.com', '1:987654321098:android:abcdef0123456789']) {
+    assert.ok(masked.includes(v), v);
+  }
 });
