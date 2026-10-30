@@ -49,7 +49,22 @@ export function secretsOf(job) {
   if (a.serviceAccountJson) { out.push(a.serviceAccountJson); try { out.push(JSON.parse(a.serviceAccountJson).private_key); } catch { /* checked on save */ } }
   if (i.apiKey) out.push(i.apiKey.p8);
   if (i.signing) out.push(i.signing.p12, i.signing.password);
+  if (a.googleServices) out.push(a.googleServices, ...googleServicesValues(a.googleServices));
   return out.filter((s) => typeof s === 'string' && s.length > 3).flatMap((s) => s.split('\n').filter((l) => l.trim().length > 3));
+}
+
+/** Every value of the company's Firebase file (google-services.json): API keys, project and app ids, bucket, client ids. */
+export function googleServicesValues(raw) {
+  let g;
+  try { g = JSON.parse(String(raw).trim().startsWith('{') ? String(raw) : Buffer.from(String(raw), 'base64').toString('utf8')); } catch { return []; }
+  const out = [];
+  const walk = (v) => {
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  walk(g);
+  return out;
 }
 
 /**

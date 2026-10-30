@@ -29,6 +29,13 @@ platform :ios do
     team_id = job.dig('ios', 'teamId').to_s.empty? ? bid.seed_id : job.dig('ios', 'teamId')
     puts "::add-mask::#{team_id}" # public build log (README › Public repo)
 
+    # Notifications: the app id needs Apple's Push Notifications switch (OperaQ sets it when the company turns them on;
+    # set again here in case it was turned off on the portal). The fresh profile below then carries it.
+    if job['push']
+      has_push = bid.get_capabilities.any? { |c| c.capability_type.to_s == 'PUSH_NOTIFICATIONS' }
+      bid.update_capability(Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS, enabled: true) unless has_push
+    end
+
     # 2. Apple does not let anyone create the app record by API: the company makes it once in App Store Connect.
     app = Spaceship::ConnectAPI::App.find(bundle)
     puts "::add-mask::#{app.id}" if app
@@ -83,6 +90,8 @@ platform :ios do
              'Apple allows only a few distribution certificates. Revoke an unused one at developer.apple.com › Certificates, then build again.'
            elsif msg =~ /401|NOT_AUTHORIZED|authentication credentials/i
              'Apple did not accept the App Store Connect key. Check it has the Admin role, or add a new key in Phone apps › Apple.'
+           elsif msg =~ /aps-environment|push notification/i
+             'Apple has not switched on Push Notifications for this app yet. Turn iPhone notifications off and on again in Phone apps, then build again.'
            elsif msg =~ /bundle version must be higher|already been used|ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE/i
              'Apple already has this build number. Build again (OperaQ raises the number by one).'
            else

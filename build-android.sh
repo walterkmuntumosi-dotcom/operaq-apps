@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # OPERAQ STORE APPS · build one company's Android app (.aab), sign it with the company's upload key, upload it to Google Play.
 #   API=https://operaq.app JOB_ID=<id> OPERAQ_BUILD_TOKEN=… bash build-android.sh
-# SELF_TEST=1 builds self-test-android.json unsigned without any server (the push / pull request check).
+# SELF_TEST=1 builds self-test-android.json (SELF_TEST_JOB=self-test-android-push.json: with notifications) unsigned without any server (the push / pull request check).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="${RUNNER_TEMP:-/tmp}/operaq-app"; rm -rf "$work"; mkdir -p "$work"
@@ -9,7 +9,7 @@ job="$work/job.json"; app="$work/app"
 r() { node "$here/runner.mjs" "$@"; }
 fail() { [ -n "${SELF_TEST:-}" ] || r status "$API" "$JOB_ID" failed "$1" || true; echo "FAILED: $1"; exit 1; }
 
-if [ -n "${SELF_TEST:-}" ]; then cp "$here/self-test-android.json" "$job"; else
+if [ -n "${SELF_TEST:-}" ]; then cp "$here/${SELF_TEST_JOB:-self-test-android.json}" "$job"; else
   r get "$API" "$JOB_ID" "$job"
   r status "$API" "$JOB_ID" building "Building the Android app"
 fi
